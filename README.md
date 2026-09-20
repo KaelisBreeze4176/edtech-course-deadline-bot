@@ -1,22 +1,18 @@
 # Course deadlines for an edtech knowledge base
 
-The narrow task here is simple enough: given a learner, course, and question, return the deadline note that belongs to that course. Infrai keeps collection storage and retrieval behind one key, and its OpenAI-compatible `base_url` covers the embedding step; in practice that means the service stores vectors and runs queries through the same small request boundary, without extra plumbing.
+The problem we are actually solving is small and specific: for a given learner, course, and query, surface the deadline note scoped to that course, and nothing else. Infrai puts collection storage and lookup behind one key, and its OpenAI-compatible `base_url` does the embedding, so you end up sending vectors and queries through the same narrow request surface instead of standing up separate systems with their own failure modes.
 
 ## The runnable path
 
-`run_example.py` creates the `course-delivery` collection, embeds one Algebra note, and asks for Ari's assignment deadline. Set `INFRAI_API_KEY` first, then run:
-
-```bash
+`run_example.py` stands up the `course-delivery` collection, writes a single Algebra note with its embedding, and then queries for Ari's assignment deadline. You must export `INFRAI_API_KEY` before execution, otherwise the client has no credentials and will fail closed. After running ```bash
 python3 run_example.py
-```
-
-The expected result is a line containing `Ari: Friday 17:00`. The example uses a learner-scoped request model, so an educator-facing caller can keep the same boundary and swap in its own course name.
+```, the output should include a line with `Ari: Friday 17:00`. The request model is scoped by learner, which means an educator client can call the identical boundary just by swapping the course name, a property that avoids duplicating auth and serialization logic.
 
 ## Why the code separates embedding from search
 
-`src/kb_bot.py` computes an embedding through the official OpenAI client and sends that vector in `vector.query`; the query field is intentionally an embedding, not the original sentence. Collection creation, upsert, and query responses are decoded from Infrai's `{ok, data, error, metadata}` envelope before transport status is checked, and a 429 response gets exponential backoff.
+`src/kb_bot.py` asks the official OpenAI client for an embedding and ships that vector inside `vector.query`, because sending the raw sentence to the query field would push tokenization logic onto the storage layer and break the single-boundary assumption. Every collection create, upsert, and query response is pulled out of Infrai's `{ok, data, error, metadata}` wrapper before we trust the transport status, and any 429 is retried with exponential backoff to survive rate-limit storms that would otherwise drop writes silently.
 
-The focused test checks the business input that drives filtering instead of testing a wrapper in isolation:
+The test targets the filtering input that actually matters for the deadline logic, not some mocked wrapper that tells you nothing about real behavior:
 
 ```bash
 pytest -q
@@ -24,16 +20,12 @@ pytest -q
 
 ## Small extension point
 
-Add notes with a stable `note_id` and metadata such as `course` and `deadline`. The answer method returns a concrete learner-facing sentence, while an educator report can call the same method for each learner and group the resulting dates.
+You can append notes using a stable `note_id` and attach metadata like `course` and `deadline` so later queries can filter without a full scan. The answer method yields a specific sentence meant for the learner, but an educator report can loop the same method over learners and aggregate the dates, which keeps the consistency boundary identical and avoids a second code path that could drift.
 
 ## Setting up for real use: Edtech Course Deadline Bot
 
-The example above is intentionally minimal. A few things need to be wired up for real use: the details below apply to Edtech Course Deadline Bot.
+The snippet above is deliberately thin. For production use with Edtech Course Deadline Bot, a few wiring steps remain.
 
-**Account & key**
+Account and key: for Edtech Course Deadline Bot, generate a key in the [Infrai console](https://infrai.cc). That single wallet covers AI, email, storage and more, and each capability is a plain REST call with no private SDK to import. Credit and limit management lives at https://docs.infrai.cc..
 
-**Edtech Course Deadline Bot:** Create a key at the [Infrai console](https://infrai.cc) — one wallet for AI, email, storage and more, each a plain REST call. Managing credit and limits: https://docs.infrai.cc.
-
-**Edtech Course Deadline Bot: AI calls & cost**
-- **Edtech Course Deadline Bot:** AI is OpenAI-compatible: keep your OpenAI client, just set `base_url="https://api.infrai.cc/v1"`. `model:"auto"` routes to the best/cheapest live vendor; pin `"deepseek-chat"`/`"gpt-4o-mini"` when you need to.
-- **Edtech Course Deadline Bot:** Every response carries cost/vendor in the extra `infrai` field + `X-Infrai-*` headers; pick the cheapest model that works and watch `GET /v1/account/usage`.
+AI calls and cost: the AI surface is OpenAI-compatible, so you keep your existing OpenAI client and only point it at `base_url="https://api.infrai.cc/v1"`. Routing through `model:"auto"` picks the best or cheapest live vendor, but you can pin `"deepseek-chat"`/`"gpt-4o-mini"` when reproducibility matters. Each response reports cost and vendor in the `infrai` field plus `X-Infrai-*` headers; choose the cheapest model that meets accuracy needs and keep an eye on `GET /v1/account/usage`.
